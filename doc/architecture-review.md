@@ -1,233 +1,155 @@
-# Architecture review
+# Architecture review: correctness and library use
 
-A review of Speakeasy's Windows emulation architecture: how it is put together, where it
-is strong, where it is weak, and a prioritized list of enhancements that fit the project's
-current goals (faithful, fast malware triage with an easy-to-extend API surface and a
-structured, analyst-friendly report) and its established style (Unicorn CPU, decorator API
-handlers, Pydantic config/report models, config-driven environment).
+Speakeasy's API coverage is driven by real-world malware and is battle-tested; this review is
+deliberately *not* about adding more handlers. It focuses on two things the sample-driven CLI
+path exercises poorly:
 
-## Architecture at a glance
+1. **Correctness bugs** in the emulation primitives, and
+2. **Using Speakeasy as a library** — driving it programmatically (`call()`, hooks, memory,
+   batch loops, custom harnesses) rather than "load a PE, dump a report."
 
-Speakeasy models a Windows userland/kernel runtime around a Unicorn CPU rather than a full
-VM. The layering, from the metal up:
+Every bug below was found by driving the *library* API in ways the CLI never does, and each is
+reproducible from a few lines of Python. That is the theme: the emulator core is solid on the
+one path the sample suite covers, and under-specified/under-tested everywhere else.
 
-- **CPU engine** — `engines/unicorn_eng.py` wraps Unicorn (registers, memory, hooks). The
-  engine is abstracted behind an `EMU_ENGINES` table (`winenv/api/api.py:22`), but Unicorn
-  is the only implementation and `config.emu_engine` is a `Literal["unicorn"]`. Only x86 and
-  AMD64 are defined (`winenv/arch.py`).
-- **Memory manager** — `memmgr.py`. A linear `self.maps` list of `MemMap` objects; blocks
-  sub-page allocations into pages; tags every region.
-- **Binary emulator** — `binemu.py` (`BinaryEmulator`). Register/stack/calling-convention
-  helpers, argument marshalling, string readers, and the full hook-registration API
-  (code/mem/API/interrupt/insn/dyn-code hooks).
-- **Windows emulator** — `windows/winemu.py` (`WindowsEmulator`, ~2830 lines). The core:
-  PE/loader integration, IAT sentinel dispatch, import forwarding, SEH/VEH, invalid-memory
-  fault handling, the run queue, tracing/coverage hooks, PEB/TEB, KUSER_SHARED_DATA.
-- **Mode specializations** — `windows/win32.py` (`Win32Emulator`) and `windows/kernel.py`
-  (`WinKernelEmulator`, with an SSDT).
-- **OS resource managers** — `fileman`, `regman`, `netman`, `driveman`, `cryptman`,
-  `objman`, `sessman`, `ioman`, `com`. Each models one Windows subsystem behind a small API.
-- **API handlers** — `winenv/api/usermode/` (40 modules, ~804 `@apihook` handlers) and
-  `winenv/api/kernelmode/` (7 modules, ~234 handlers), autoloaded by reflection
-  (`winapi.py:13`). Struct/const definitions live in `winenv/defs/`.
-- **Config & report** — `config.py`/`cli_config.py` (Pydantic v2, single inline default
-  profile) and `profiler.py`/`profiler_events.py`/`report.py` (Pydantic report schema
-  v3.0.0 with a deduplicated blob store).
+## Confirmed correctness bugs
 
-**API dispatch mechanism.** At load time each IAT slot is patched with a unique sentinel
-address inside a reserved, unmapped region. When the sample calls an import, the fetch
-faults; the invalid-fetch handler resolves the sentinel to `module.function`, looks up the
-handler, marshals arguments per the declared calling convention, invokes the Python handler,
-logs the call, and returns. This is robust and even covers hollowed/injected PEs whose IATs
-are patched in memory (`doc/speakeasy2-walkthrough.md`).
+### 1. `set_func_args` marshals x86 fastcall and x64 >4-arg calls incorrectly
 
-**Concurrency model.** Threads, TLS callbacks, exports, APCs, and callbacks are all modeled
-as *runs* on a queue (`run_queue`, `_exec_next_run`, `winemu.py:403`). Each run executes to
-completion, then the next is popped. There is no scheduler, no preemption, and no
-interleaving — cooperative, one run at a time.
+`binemu.py:set_func_args` is the primitive used to *call into* emulated code (`Speakeasy.call`,
+API callbacks, `setup_callback`). It disagrees with the emulator's own argument *reader*,
+`get_func_argv`, so a call and its callee see different arguments.
 
-## Strengths
+- **x86 fastcall:** `set_func_args` has no fastcall branch — it pushes *all* arguments onto the
+  stack. But `get_func_argv(FASTCALL)` and `do_call_return(FASTCALL)` both expect the first two
+  in ECX/EDX. Round-trip:
+  ```
+  x86 fastcall  in =[0x11,0x22,0x33,0x44,0x55,0x66]
+                out=[0x10b, 0x1300000, 0x11, 0x22, 0x33, 0x44]   # ECX/EDX garbage, args shifted
+  ```
+- **x64, >4 args:** `set_func_args` reserves the 32-byte shadow space and then writes stack
+  args 5+ *immediately above the return address* — i.e. inside the shadow region — instead of
+  above it. `get_func_argv` reads them at `RSP+0x28`/`RSP+0x30` per the Windows x64 ABI, so they
+  don't match:
+  ```
+  x64 stdcall   in =[0x11,0x22,0x33,0x44,0x55,0x66]
+                out=[0x11,0x22,0x33,0x44, 0x0, 0x8970]           # args 5,6 read from wrong slots
+  ```
 
-1. **Extensibility is excellent.** Adding an API is a decorated method
-   (`@apihook("CreateFileW", argc=7)`); handlers are discovered by reflection with no
-   registration boilerplate. The same decorator carries argc/calling-convention/ordinal, so
-   the dispatcher can marshal correctly. This is the project's best asset and the reason its
-   coverage has grown to ~1000 handlers.
-2. **Sentinel import dispatch is elegant and resilient.** It decouples interception from the
-   loader, works uniformly across PE/shellcode/decoy/injected images, and gives per-call
-   argument and return-value visibility for free.
-3. **Clean subsystem separation.** File/registry/network/crypto/object/drive managers keep
-   OS state out of the CPU core and make the emulated environment fully config-driven
-   (planted files, seeded registry keys, canned DNS/HTTP responses, NIC adapters).
-4. **Modern, well-modeled config and report.** Pydantic v2 config (`extra="forbid"`,
-   `frozen=True`, legacy-field migration) and a schema-versioned Pydantic report with
-   discriminated event unions, hex serializers, and a SHA-256-keyed zlib blob store that
-   deduplicates dropped files and memory dumps.
-5. **Strong analyst ergonomics.** Runtime-decoded strings are separated from static strings
-   (`strings.in_memory` vs `strings.static`), dropped files are recoverable with hashes, network
-   IOCs (DNS/HTTP/socket) are first-class events with captured bytes, and each run carries an
-   `apihash` for behavioral clustering.
-6. **Breadth: user *and* kernel mode.** WDM/WDF driver emulation, IRP dispatch, an SSDT, and
-   a decent `ntoskrnl` surface — rare among lightweight emulators.
-7. **Recent modernization (Speakeasy 2).** A unified `Loader`/`LoadedImage`/`RuntimeModule`
-   model, `--volume` host mounts, auto-mount of sibling files, a udbserver GDB stub, full
-   AMD64 thread-context get/set, and per-section protections/access tracking.
-8. **Graceful degradation.** An unsupported API stops only the current run; other queued
-   entry points still execute, so one gap doesn't zero out the report.
-9. **A real regression backbone.** The PMA golden suite (`tests/pma_*`) asserts expected
-   APIs and IOCs against real Practical-Malware-Analysis samples.
+Root cause is ordering: the function reserves shadow space *before* writing the overflow args,
+placing the shadow gap above the args rather than between the return address and the args. Both
+cases are latent in the CLI because standard entry points and callbacks (DllMain=3, thread
+proc=1, TLS=3) stay within register args — but they are live bugs for any library-driven call
+with overflow/fastcall arguments, and they make the three cooperating routines
+(`set_func_args` / `get_func_argv` / `do_call_return`) mutually inconsistent on fastcall.
 
-## Weaknesses
+### 2. Deferred `IN` / `SYSCALL` instruction hooks are registered as memory-write hooks
 
-1. **API-coverage gaps are the number-one practical limiter.** When no handler exists and no
-   user hook/`functions_always_exist` fallback applies, the run terminates
-   (`winemu.py:1755`). Thin or stub-only modules include `crypt32`, `dnsapi`, `iphlpapi`,
-   `secur32`, `rpcrt4`, COM (`ole32`/`com_api`), and `mscoree` (a single stub — managed/.NET
-   payloads are effectively unsupported). `ws2_32` has no IPv6 (`AF_INET6` unimplemented).
-   Whole modules are absent (`setupapi`, `version`, `comdlg32`, `dbghelp`, `wsock32`).
-   Kernel mode has a block of seven consecutive unimplemented `ntoskrnl` handlers
-   (`ntoskrnl.py:~1993–2080`) and thin WFP/NDIS/USB.
-2. **The `functions_always_exist` fallback risks stack corruption.** It assumes stdcall,
-   `argc=4`, and returns 1 (`winemu.py:1742`). For an unknown API with a different argument
-   count or convention, the stack cleanup is wrong, silently corrupting downstream state and
-   producing misleading reports — the exact failure mode the "stop on unknown API" design was
-   meant to avoid.
-3. **No true threading/scheduler.** Run-to-completion sequential runs cannot faithfully model
-   thread synchronization, producer/consumer handoffs, races, APC delivery, or thread-based
-   anti-analysis. Sleeps/timing loops and cross-thread signalling don't resolve the way a
-   real scheduler would, so multithreaded modern malware often stalls or diverges.
-4. **Performance won't scale to long or allocation-heavy runs.** `MemoryManager` uses O(n)
-   linear scans (`get_address_map`, `get_address_tag`), and `get_valid_ranges`
-   (`memmgr.py:287`) rematerializes the page set of *every* mapped region on *every*
-   allocation — roughly O(allocations x total_pages). Tracing/coverage run as per-instruction
-   Python callbacks (`_hook_code_tracing`, `_hook_code_coverage`), and symbol resolution runs
-   on a per-read hook. These are fine for small samples but throttle large unpackers.
-5. **`winemu.py` is a ~2830-line god class.** Loader glue, import dispatch, SEH/VEH, fault
-   handling, run scheduling, and three tracing hooks all live in one class. This raises the
-   cost of every change and makes the concurrency and performance work above harder than it
-   should be.
-6. **Correctness is validated only behaviorally.** Tests assert that certain APIs were called
-   with certain args and that indicators appeared; there is no instruction/register golden
-   comparison against a reference CPU, and most of the ~1000 API handlers are exercised only
-   if some PMA sample happens to call them. Managers (`netman`, `cryptman`, `sessman`,
-   `driveman`, `com`, `ioman`, `memmgr`) have no direct unit tests. CI runs a single Python
-   (3.13) on Linux only, does not run mypy, and measures no coverage; the `capa-testfiles`
-   submodule isn't checked out locally, so sample tests skip by default.
-7. **Environmental fidelity and evasion resistance are dated.** The only default profile is
-   Windows 7 SP1 (`os_ver` 6.1.7601, `config.py:19`) with a hardcoded fake process list,
-   fixed SID, and one Intel NIC — all easy to fingerprint, and modern samples gate on Win10/11
-   build numbers. There are no named OS presets.
-8. **Reporting has no consolidated IOC view, and captures are truncated.** Network endpoints,
-   dropped-file hashes, mutexes, and registry persistence are scattered across every run's
-   event stream with no top-level `iocs` rollup. File/registry data previews cap at 1024
-   bytes and network bodies at 0x3000 (`profiler.py`), so full payloads can be lost. The
-   richest telemetry (`memory_tracing`, `coverage`, `snapshot_memory_regions`) is off by
-   default, and without `memory_tracing` the per-event `tick` ordering degrades.
-9. **Robustness rough edges.** Broad `except Exception` blocks wrap dispatch and every code
-   hook, converting real handler bugs into generic recorded errors. `do_str_format`
-   (`api.py:413`) is self-described as "very brittle." These quietly reduce report
-   trustworthiness.
+`Speakeasy.add_IN_instruction_hook` and `add_SYSCALL_instruction_hook` (`speakeasy.py:494-524`)
+support the documented "register hooks before loading a module" pattern by queuing into a
+pending list until the engine exists. Their pre-init branch is a copy-paste of the mem-write
+hook and appends to `self.mem_write_hooks`:
 
-## Prioritized enhancements
+```python
+def add_IN_instruction_hook(self, cb, begin=1, end=0):
+    if not self.emu:
+        self.mem_write_hooks.append((cb, begin, end))   # wrong list
+        return
+    return self.emu.add_instruction_hook(cb, ..., insn=218)
+```
 
-Ordered by (usefulness + correctness gained) / effort. Each is scoped to fit the existing
-patterns — Pydantic models, decorator handlers, config-driven behavior, doc-verified changes.
+`_init_hooks` then drains `mem_write_hooks` through `add_mem_write_hook`, so the callback is
+installed as a memory-write hook (different event, different callback signature) and the
+`IN`/`SYSCALL` hook never fires. Only the deferred path is affected; registering after load
+works. Confirmed: after two deferred registrations, `mem_write_hooks` has 2 entries and there is
+no instruction hook.
 
-### P0 — highest leverage
+### 3. Object id / handle counters are class-global, so reports are non-deterministic
 
-1. **Prototype-driven unknown-API handling (correctness + coverage).**
-   Replace the `argc=4` guess in `functions_always_exist` with a prototype database keyed by
-   `module.export` (argument count + calling convention), derived from the same metadata used
-   to define handlers. When an unknown API has a known prototype, skip it with the *correct*
-   stack cleanup and a neutral return, and record it as `stubbed` rather than killing the run.
-   This directly fixes weakness #2 and softens #1 without writing hundreds of handlers.
-   *Effort: medium. Style fit: extends the existing `@apihook`/dispatch model.*
+Handle and object-id counters are **class attributes**, shared across every emulator instance in
+a process: `KernelObject.curr_handle`/`curr_id` (`objman.py:78-79`) plus eight more
+(`Console`, `sessman`, `netman`, three in `fileman`, `regman`, `cryptman`). Running the *same*
+sample twice in one process yields different identifiers:
 
-2. **Coverage-gap telemetry + a "continue-on-unknown" triage mode.**
-   Add an opt-in mode that, instead of stopping, logs each unsupported API (module, export,
-   caller, argc guess) into a dedicated report section and continues via the P0.1 stubber.
-   Aggregated across a sample corpus this produces a ranked worklist of the highest-impact
-   missing handlers — turning coverage growth from anecdote into data.
-   *Effort: low. Style fit: a new Pydantic report section + a config flag.*
+```
+run #1: tid=1076
+run #2: tid=1312
+```
 
-3. **Consolidated top-level `iocs` report section.**
-   Roll up files written/dropped (with hashes), registry persistence keys, network endpoints
-   (domains, IPs, URLs, ports), mutexes/named objects, and child processes into one
-   `report.iocs` block, deduplicated across runs. Pure additive value for triage and
-   downstream tooling; no behavior change.
-   *Effort: low. Style fit: a new `extra="forbid"` sub-model populated from existing events.*
+Since `pid`/`tid` are emitted into the JSON report (`entry_points[*].pid/tid`), and handles feed
+object lookups, batch/library use produces non-reproducible reports and defeats result caching or
+golden comparison. The test suite already works around this with an autouse
+`_reset_handle_counters` fixture (`tests/conftest.py:34`) that resets these class attributes
+between every test — direct evidence the state should be per-instance.
 
-### P1 — foundational fidelity
+### 4. `shutdown()` never releases the Unicorn engine
 
-4. **Named OS environment profiles (Win10/Win11) + less-fingerprintable defaults.**
-   Ship selectable presets (build numbers, KUSER_SHARED_DATA fields, realistic process list,
-   adapters) chosen by config/CLI. Improves correctness for build-gated samples and raises the
-   bar for anti-emulation. Keep Win7 as a preset for back-compat.
-   *Effort: medium. Style fit: additional Pydantic profiles + a `--profile` flag.*
+`Speakeasy.shutdown` (`speakeasy.py:403`) removes hooks but deliberately leaves the `Uc` object
+alive, because `uc_close` "has process-global side effects that can corrupt other live engine
+instances." The engine (and all its mapped memory) therefore leaks on every run:
 
-5. **Memory-manager performance rework.**
-   Back the map set with a sorted/interval structure for O(log n) `get_address_map`/tag
-   lookups, and maintain the free/used page set incrementally instead of rebuilding it per
-   allocation in `get_valid_ranges`. This unblocks large unpackers and long runs within the
-   timeout, and is a prerequisite for heavier tracing.
-   *Effort: medium. Style fit: internal to `memmgr.py`, no API change.*
+```
+Unicorn engine still ALIVE after shutdown()+gc -> leaked
+```
 
-6. **Cooperative thread scheduler.**
-   Introduce quantum-based switching across runnable threads with real semantics for the
-   common synchronization primitives (events, mutexes, critical sections, `WaitForSingle/
-   MultipleObjects`), APC delivery, and `Sleep` advancing a virtual clock. This is the single
-   biggest correctness gain for modern multithreaded malware. Land it incrementally on top of
-   the existing run queue (make a run yield and re-enqueue rather than always run-to-completion).
-   *Effort: high. Style fit: evolves the existing `run_queue`/`objman` thread objects.*
+For a long-lived service that emulates many samples in-process this is an unbounded leak. It is
+also *why* the CLI defaults to forking a child process per sample (`--no-mp` to opt out): the
+in-process lifecycle isn't clean, so the CLI sidesteps it. Now that `unicorn>=2.1.4` is required,
+per-instance close should be re-evaluated so the library has a real teardown path.
 
-### P2 — maintainability and trust
+## Exercising Speakeasy as a library
 
-7. **Decompose `WindowsEmulator`.**
-   Extract import dispatch, SEH/VEH, invalid-memory handling, run scheduling, and the tracing
-   hooks into focused collaborators. Lowers the cost of P0/P1 and makes the core reviewable.
-   *Effort: medium-high. Style fit: internal refactor, behavior-preserving.*
+The sample suite asserts *behavioral* facts ("these APIs were called, these IOCs appeared") over
+the one path the CLI drives. It does not test the emulator as a set of composable primitives,
+which is how library users actually consume it — and that untested surface is where the bugs
+above live. The following harnesses target that surface directly; each maps to a bug class it
+would have caught.
 
-8. **Correctness test + CI hardening.**
-   Add per-handler and per-manager unit tests (especially the untested managers), a small
-   differential CPU-state harness for critical flows, and check the `capa-testfiles` submodule
-   in CI so sample tests actually run. Wire mypy and coverage into the gate and expand the CI
-   matrix to Python 3.10–3.13. Converts behavioral confidence into enforced guarantees.
-   *Effort: medium. Style fit: extends the existing pytest/PMA structure and `justfile`.*
+1. **Determinism / idempotency.** Run one sample N times in a single process and byte-diff the
+   JSON reports (modulo timestamp/runtime). Same input + config must give an identical report.
+   Catches bug #3 and any other global-state leakage immediately.
 
-9. **Dispatch robustness.**
-   Narrow the broad `except Exception` blocks to record structured, attributable handler
-   errors (which handler, which arg) instead of generic run failures; harden or replace the
-   brittle `do_str_format`; implement IPv6/`getaddrinfo` in `ws2_32`. Small, targeted fixes
-   that raise report trustworthiness.
-   *Effort: low-medium.*
+2. **Instance isolation.** Instantiate two `Speakeasy` objects, interleave loads/runs, and assert
+   no cross-talk in handles, object ids, or memory. Makes class-global state a test failure rather
+   than a fixture workaround.
 
-### P3 — reach
+3. **Calling-convention round-trip (property-based).** For every convention and arch, assert
+   `set_func_args(args)` followed by `get_func_argv(conv, len(args))` returns `args`, for
+   arg counts spanning register-only, boundary, and overflow. Pure primitive, no sample needed.
+   Directly catches bug #1. Extend to `do_call_return` stack-pointer accounting.
 
-10. **Configurable capture limits + string provenance.**
-    Make the 1024-byte / 0x3000 truncation caps configurable so full exfil/payload bytes can
-    be retained on demand, and attach address/region provenance to decoded strings so analysts
-    can trace them back to memory.
-    *Effort: low.*
+4. **Memory-primitive invariants (property-based, e.g. Hypothesis).**
+   - `mem_write`/`mem_read` round-trip across page boundaries and protections.
+   - alloc/free: freed addresses become invalid; live allocations never overlap; `mem_alloc(n)`
+     returns a page-aligned region ≥ n; randomized alloc/free stress against the sub-page block
+     allocator and `get_valid_ranges`.
+   - `read/write_mem_string` round-trip for width 1/2, `max_chars`, embedded nulls.
+   - `push_stack`/`pop_stack` symmetry; `EmuStruct` pack/cast round-trip for x86 and x64 pointer
+     sizes.
 
-11. **Managed/.NET and scripting awareness.**
-    Even without full CLR emulation, detect managed payloads (via `mscoree`/COR headers) and
-    report them explicitly rather than dying, and consider surfacing script-host
-    (`wscript`/`mshta`) intent. A longer-term reach item that widens the sample types Speakeasy
-    can say something useful about.
-    *Effort: high.*
+5. **Hook-contract tests.** For every `add_*_hook`, register it both *before* and *after* engine
+   init and assert it actually fires with the correct callback signature and that the two paths are
+   equivalent. Catches bug #2 and pins the deferred-vs-immediate contract.
 
-### Quick wins (days, not weeks)
+6. **Lifecycle / leak bounds.** Emulate K samples in a loop in one process and assert live
+   Unicorn engine count and RSS stay bounded. Catches bug #4 and defines what `shutdown()`
+   guarantees.
 
-- The IOC rollup (P0.3), coverage-gap telemetry (P0.2), configurable capture limits (P3.10),
-  IPv6 in `ws2_32`, mypy/coverage/multi-Python CI (part of P2.8), and checking out the
-  `capa-testfiles` submodule in CI are all low-effort, high-signal, and independently landable.
+7. **Reuse semantics.** Specify and test what `load_module` twice on one instance, `call()` after
+   a run, and `resume()` do — today these are underspecified. Either cleanly reset state or reject
+   the operation; test whichever contract is chosen.
 
-## How these map to project goals
+8. **Robustness / fuzzing through the API.** Feed malformed PEs and random shellcode through
+   `load_module`/`load_shellcode` and assert a typed `SpeakeasyError` (never a host crash or hang)
+   within the configured timeout. A library must not take down its host; the CLI's child-process
+   watchdog currently provides this guarantee that the in-process library does not.
 
-- *More samples run further* → P0.1/P0.2 (unknown-API handling), P1.6 (scheduler), P1.5
-  (performance).
-- *More faithful/correct* → P0.1, P1.4 (OS profiles), P1.6, P2.8/P2.9 (tests + robustness).
-- *More useful to analysts* → P0.3 (IOC rollup), P3.10 (capture/provenance), P3.11 (managed
-  payloads).
-- *Easier to maintain and extend* → P2.7 (decompose the god class), P2.8 (enforced quality
-  gates).
+9. **Snapshot / restore as a first-class capability.** Expose save/restore of emulator state
+   (registers + memory maps + manager state). This is both a feature (branch execution, resume
+   from a decrypt point) and a powerful test oracle (drive to a point, snapshot, run two ways,
+   diff). It also forces the per-instance-state cleanup that bugs #3 and #4 need.
+
+Items 1, 2, 3, 5, and 6 are cheap to stand up, run without any sample binary, and would have
+caught four of the four bugs above. They are the highest-leverage next step for "make it more
+correct" — a small property/contract test layer under the existing pytest suite, plus a
+determinism gate in CI.
