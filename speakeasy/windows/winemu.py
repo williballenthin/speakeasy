@@ -414,7 +414,81 @@ class WindowsEmulator(BinaryEmulator):
         self._seh_last_fault = None
         self._seh_repeat_count = 0
         self.reset_stack(self.stack_base)
+        # A run transition reuses the same Unicorn instance (control moves by
+        # rewriting PC/SP inside emu_start), so the next run would otherwise
+        # inherit the previous run's register/flag state. Establish a fresh
+        # thread context for runs after the first (the first run's registers are
+        # set intentionally by the caller before start(), e.g. shellcode ECX).
+        self.reset_cpu_context()
+        self._clear_run_stack()
         return self._prepare_run_context(run)
+
+    def reset_cpu_context(self):
+        """
+        Establish a defined initial CPU state for a new run, the way a freshly
+        created Windows thread would start rather than inheriting the previous
+        run's state.
+
+        Resets the general-purpose registers and EFLAGS only. ESP/EBP are set by
+        reset_stack and the argument registers are set by set_func_args (both run
+        around this), so those values win. Process-global memory (heap, modules,
+        globals) is intentionally left intact -- runs share one process.
+
+        Note: XMM/x87-FPU state is not reset here; the engine register map only
+        exposes XMM0-3, so a complete SIMD/FPU reset needs an expanded map and is
+        tracked separately.
+        """
+        arch = self.get_arch()
+        # EFLAGS with the reserved bit (1) and IF set, and DF cleared. A real
+        # thread always starts with DF=0; leaving it set corrupts rep string ops.
+        fresh_eflags = 0x202
+        if arch == _arch.ARCH_X86:
+            gp_regs = (
+                _arch.X86_REG_EAX,
+                _arch.X86_REG_EBX,
+                _arch.X86_REG_ECX,
+                _arch.X86_REG_EDX,
+                _arch.X86_REG_ESI,
+                _arch.X86_REG_EDI,
+            )
+        elif arch == _arch.ARCH_AMD64:
+            gp_regs = (
+                _arch.AMD64_REG_RAX,
+                _arch.AMD64_REG_RBX,
+                _arch.AMD64_REG_RCX,
+                _arch.AMD64_REG_RDX,
+                _arch.AMD64_REG_RSI,
+                _arch.AMD64_REG_RDI,
+                _arch.AMD64_REG_R8,
+                _arch.AMD64_REG_R9,
+                _arch.AMD64_REG_R10,
+                _arch.AMD64_REG_R11,
+                _arch.AMD64_REG_R12,
+                _arch.AMD64_REG_R13,
+                _arch.AMD64_REG_R14,
+                _arch.AMD64_REG_R15,
+            )
+        else:
+            return
+
+        for reg in gp_regs:
+            self.reg_write(reg, 0)
+        self.reg_write(_arch.X86_REG_EFLAGS, fresh_eflags)
+
+    def _clear_run_stack(self):
+        """
+        Zero the stack region between runs so a run cannot read data left on the
+        stack by the previous run. Bounded to the dedicated stack mapping and
+        guarded so it can never break a run.
+        """
+        try:
+            if not self.stack_base:
+                return
+            mm = self.get_address_map(self.stack_base - 1)
+            if mm and mm.tag and mm.tag.startswith("emu.stack"):
+                self.mem_write(mm.base, b"\x00" * mm.size)
+        except Exception:
+            pass
 
     def call(self, addr, params=[]):
         """
