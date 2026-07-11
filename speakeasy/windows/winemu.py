@@ -1052,6 +1052,12 @@ class WindowsEmulator(BinaryEmulator):
 
         ptr_size = self.get_ptr_size()
         for imp in image.imports:
+            # Data imports are resolved to a real pointer below (in the data
+            # handler pass); they are read, not called, so they need no sentinel
+            # trap. Skipping them here avoids burning a sentinel slot and leaving
+            # an orphaned import_table entry once the slot is overwritten.
+            if self.api and self.lookup_data_handler(imp.dll_name, imp.func_name)[1]:
+                continue
             sentinel = self._alloc_sentinel()
             self.import_table[sentinel] = (_normalize_mod_name(imp.dll_name), imp.func_name)
             offset = imp.iat_address
@@ -1120,7 +1126,7 @@ class WindowsEmulator(BinaryEmulator):
                 self.add_code_hook(cb=self._module_access_hook, begin=mod_start, end=mod_end)
 
             for imp in image.imports:
-                _api_mod, eh = self.api.get_data_export_handler(imp.dll_name, imp.func_name)
+                _api_mod, eh = self.lookup_data_handler(imp.dll_name, imp.func_name)
                 if eh:
                     data_ptr = self.handle_import_data(imp.dll_name, imp.func_name)
                     sym = f"{imp.dll_name}.{imp.func_name}"
@@ -1380,12 +1386,30 @@ class WindowsEmulator(BinaryEmulator):
         self.import_table[sentinel] = (mod_name, func_name)
         return sentinel
 
+    def lookup_data_handler(self, mod_name, sym):
+        """
+        Find a data-export handler for mod_name.sym, folding the DLL name the
+        same way normalize_import_miss folds function imports (so a data export
+        imported through an api-ms-win-*/CRT/winsock umbrella name resolves).
+        Returns (module, func) or (None, None).
+        """
+        module, func = self.api.get_data_export_handler(mod_name, sym)  # type: ignore[union-attr]
+        if func:
+            return module, func
+        for cand in self._dll_name_candidates(mod_name):
+            if cand == mod_name:
+                continue
+            module, func = self.api.get_data_export_handler(cand, sym)  # type: ignore[union-attr]
+            if func:
+                return module, func
+        return None, None
+
     def handle_import_data(self, mod_name, sym, data_ptr=0):
         """
         Data that is imported (e.g. KeTickCount) is handled with a initializer function.
         Call it here if there is a handler for the imported variable.
         """
-        module, func = self.api.get_data_export_handler(mod_name, sym)  # type: ignore[union-attr]
+        module, func = self.lookup_data_handler(mod_name, sym)
         if not func:
             module, func = self.api.get_export_func_handler(mod_name, sym)  # type: ignore[union-attr]
             if not func:
@@ -1569,48 +1593,56 @@ class WindowsEmulator(BinaryEmulator):
             traceback=traceback,
         )
 
+    def _dll_name_candidates(self, dll):
+        """
+        Candidate handler-module names for an imported DLL, in priority order:
+        the name as-imported, then its normalized form (CRT variants -> msvcrt,
+        winsock -> ws2_32, api-ms-win-* umbrella names -> kernel32), then a
+        bridge from ntdll user-mode stubs to the ntoskrnl handlers.
+        """
+        candidates = [dll]
+        norm = winemu.normalize_dll_name(dll)
+        if norm.lower() != dll.lower():
+            candidates.append(norm)
+        if dll.lower().startswith("ntdll") and "ntoskrnl" not in candidates:
+            candidates.append("ntoskrnl")
+        return candidates
+
+    def _func_name_candidates(self, name):
+        """
+        Candidate handler names for an imported function, in priority order:
+        the name as-imported, its ANSI/UNICODE base (drop a trailing A/W), and
+        its Zw*/Nt* counterpart.
+        """
+        candidates = [name]
+        if name[-1:] in ("A", "W"):
+            candidates.append(name[:-1])
+        if name.startswith("Zw"):
+            candidates.append("Nt" + name[2:])
+        elif name.startswith("Nt"):
+            candidates.append("Zw" + name[2:])
+        return candidates
+
     def normalize_import_miss(self, dll, name):
         """
-        This function attempts to fold as many function handlers together as possible.
-        For example, ntdll functions will be handled by the ntoskrnl handlers, multiple versions
-        of the C runtime are folded together, and Zw/Nt functions use the same handler.
+        Fold as many function handlers together as possible: multiple versions
+        of the C runtime and api-ms-win-* umbrella names funnel into a single
+        handler, ntdll user-mode stubs bridge to the ntoskrnl handlers, and
+        Zw*/Nt* functions share a handler.
+
+        The folding rules compose: an import that needs *both* DLL-name
+        normalization *and* function-name folding (e.g. an ``A``/``W`` function
+        imported through an ``api-ms-win-*`` umbrella name) is resolved by
+        trying every (dll candidate, name candidate) combination. This is kept
+        distinct from the direct lookup in handle_import_func, which has already
+        tried (dll, name) verbatim before we get here.
         """
-        alt_imp_api = ""
-        alt_imp_dll = ""
-        mod, func_attrs = None, None
-
-        # Handle ANSI vs UNICODE functions
-        if name.endswith("A") or name.endswith("W"):
-            alt_imp_api = name[:-1]
-
-        # Handle Zw*/Nt* function overlap
-        if dll.lower().startswith("ntoskrnl"):
-            if name.startswith("Zw"):
-                alt_imp_api = f"Nt{name[2:]}"
-            elif name.startswith("Nt"):
-                name = "Zw" + name[2:]
-                alt_imp_api = f"Zw{name[2:]}"
-
-        alt_imp_dll = winemu.normalize_dll_name(dll)
-
-        # Bridge ntdll funcs to ntoskrnl if supported
-        if dll.lower().startswith("ntdll"):
-            alt_imp_dll = "ntoskrnl"
-            mod, func_attrs = self.api.get_export_func_handler(alt_imp_dll, name)  # type: ignore[union-attr]
-            if not func_attrs:
-                if name.startswith("Zw"):
-                    alt_imp_api = f"Nt{name[2:]}"
-                elif name.startswith("Nt"):
-                    name = "Zw" + name[2:]
-                    alt_imp_api = f"Zw{name[2:]}"
-                mod, func_attrs = self.api.get_export_func_handler(alt_imp_dll, alt_imp_api)  # type: ignore[union-attr]
-            return mod, func_attrs
-
-        if alt_imp_api:
-            mod, func_attrs = self.api.get_export_func_handler(dll, alt_imp_api)  # type: ignore[union-attr]
-        elif alt_imp_dll:
-            mod, func_attrs = self.api.get_export_func_handler(alt_imp_dll, name)  # type: ignore[union-attr]
-        return mod, func_attrs
+        for cand_dll in self._dll_name_candidates(dll):
+            for cand_name in self._func_name_candidates(name):
+                mod, func_attrs = self.api.get_export_func_handler(cand_dll, cand_name)  # type: ignore[union-attr]
+                if func_attrs:
+                    return mod, func_attrs
+        return None, None
 
     def read_unicode_string(self, addr):
         """
