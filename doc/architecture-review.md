@@ -226,3 +226,83 @@ memory — at which point the fetch no longer faults and the call is silently mi
 Findings #1 and #2 share one root cause (folding rules that don't compose) and one fix; a table
 test over `(dll, func)` → expected-handler pairs covering apiset/CRT/winsock × A/W/ordinal/base
 would lock it down and belongs in the contract-test layer above.
+
+## Cross-run state reset (multi-export / multi-thread)
+
+When a module is emulated with `all_entrypoints=True`, each export is a separate `Run`, and the
+same is true for TLS-callback → module-entry → export sequences, `CreateThread` runs, API
+callbacks, queued runs, and child processes. These runs must start from an independent, defined
+CPU state — an export invoked second must not see state left by the export invoked first. **They
+do not.**
+
+### 1. CPU registers and EFLAGS bleed across run boundaries (confirmed)
+
+Run transitions do **not** go through a fresh `emu_start`. A run ends by returning to the
+sentinel `return_hook`, which the transient code hook catches (`_hook_code_core`,
+`winemu.py:2070`); that calls `on_run_complete` → `_exec_next_run` → `_prepare_run_context`,
+which rewrites PC/SP and returns *inside the same Unicorn `emu_start` call*. Unicorn simply
+continues at the new PC with **every other register unchanged**.
+
+The only state reset per run is:
+- `_exec_next_run` (`winemu.py:403`): `run_complete`, `_seh_last_fault`, `_seh_repeat_count`,
+  and `reset_stack(self.stack_base)`.
+- `reset_stack` (`binemu.py:577`): writes **only ESP/EBP** (plus x64 shadow space).
+- `_prepare_run_context` (`winemu.py:435`): new `Run`, stack args, process/thread context,
+  TEB/TLS re-init, and `set_pc(start_addr)`.
+
+There is **no** reset of EAX/EBX/ECX/EDX/ESI/EDI (and x64 R8–R15), **EFLAGS**, XMM, the x87 FPU
+stack, or segment selectors anywhere in run setup — `grep` for any such reset finds nothing.
+Run 1 looks clean only because a freshly constructed Unicorn engine zero-initializes registers;
+runs 2..N inherit run 1's *exit* state. Reproduced on `dll_test_x86.dll` with `all_entrypoints`
+by dirtying state during the first export and reading it at the start of the second:
+
+```
+export                        ESI        EDI        EBX  DF
+emu_test_one                  0x0        0x0        0x0  clr     # clean (fresh engine)
+emu_test_two           0xdead0001        0x0        0x0  SET     # inherited from emu_test_one
+```
+
+`emu_test_two` starts with the `ESI` value and the **direction flag** that were set during
+`emu_test_one`.
+
+**Why this is a correctness bug, not a cosmetic one:**
+- **Direction flag (DF) bleed is the sharp edge.** A real thread always starts with DF clear.
+  If one run leaves DF set (e.g. a `std` on a path that returns before `cld`, or hand-written
+  asm/shellcode), the next run's `rep movs`/`rep stos`/`lods`/`scas` walk *backwards* —
+  silent memory corruption and wrong results with no error.
+- **Order dependence.** Because non-volatile registers (EBX/ESI/EDI/EBP-value) carry over,
+  emulating exports in a different order can produce different results and different reports.
+  That breaks reproducibility and any golden/determinism comparison, and means a report reflects
+  an artifact of run ordering rather than the sample.
+- Compiler-generated prologues usually re-initialize before use, which is why this survives on
+  most samples — but shellcode, hand-rolled stubs, and exports that assume a zeroed register
+  file will diverge, and the divergence is data-dependent and hard to diagnose.
+
+**Correct behavior / fix:** at the start of each run, load a defined initial thread context —
+zero the general-purpose registers not otherwise set by `set_func_args`, set EFLAGS to a
+fresh-thread value with **DF=0** (e.g. `0x202`), and reset XMM/FPU/segment state — mirroring the
+CPU state a newly created Windows thread would see. Crucially this must reset **thread/CPU
+context only**, not process-global memory (heap, loaded modules, globals), which legitimately
+persists across runs in the same process. A determinism test (run the same multi-export sample
+twice, byte-diff the reports) plus an explicit "each run starts with DF=0 and zeroed
+non-argument GP registers" assertion would pin this.
+
+### 2. Related, lower-severity reset gaps (by inspection)
+
+- **Stack contents are not cleared.** `reset_stack` only moves ESP/EBP back to `stack_base`;
+  the previous run's bytes remain below the pointer, so a run that reads uninitialized stack
+  sees the prior run's data instead of fresh zeros. Same order-dependence risk as #1, narrower.
+- **`curr_mod` is not refreshed on in-hook run transitions.** It is set only when `emu_start`
+  is (re)entered (`winemu.py:588`) or lazily when `None` (`:1409`). For same-module exports this
+  is fine, but a transition whose next run starts in a *different* module (child-process
+  emulation, a queued run in another image) keeps a stale `curr_mod`, and `handle_import_func`
+  consults `curr_mod.import_table` first (`:1411`) — so imports can be resolved against the
+  wrong module's table.
+- **Memory allocations persist across runs** (heap, `VirtualAlloc`, dropped-file handles). This
+  is defensible as same-process modeling, but combined with #1 it means "invoke every export"
+  is not a clean per-export probe; it is a single accreting process. Worth making explicit in
+  the reporting/semantics docs so analysts read multi-export reports correctly.
+
+The headline (#1) is a concrete, reproduced correctness bug with a contained fix; #2 items are
+fidelity gaps that the same per-run "establish fresh thread context" routine can address in one
+place.
