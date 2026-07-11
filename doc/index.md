@@ -28,6 +28,10 @@ This page maps common tasks to the right Speakeasy documentation.
 - [GDB debugging reference](gdb.md)
 - [GDB sessions (showboat)](gdb-examples.md)
 
+## Project internals
+
+- [Architecture review](architecture-review.md)
+
 ## Extending and embedding
 
 - [Python library usage](library.md)
