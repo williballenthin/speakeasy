@@ -64,6 +64,8 @@ class Speakeasy:
         self.mem_invalid_hooks: list[tuple[Callable]] = []
         self.interrupt_hooks: list[tuple[Callable]] = []
         self.mem_map_hooks: list[tuple[Callable, int, int]] = []
+        self.in_insn_hooks: list[tuple[Callable, int, int]] = []
+        self.syscall_insn_hooks: list[tuple[Callable, int, int]] = []
 
     def __enter__(self):
         return self
@@ -171,6 +173,12 @@ class Speakeasy:
         while self.mem_map_hooks:
             h = self.mem_map_hooks.pop(0)
             self.add_mem_map_hook(h)
+        while self.in_insn_hooks:
+            cb, begin, end = self.in_insn_hooks.pop(0)
+            self.add_IN_instruction_hook(cb, begin, end)
+        while self.syscall_insn_hooks:
+            cb, begin, end = self.syscall_insn_hooks.pop(0)
+            self.add_SYSCALL_instruction_hook(cb, begin, end)
 
     def disasm(self, addr: int, size: int, fast=True):
         """
@@ -503,7 +511,7 @@ class Speakeasy:
             Hook object for newly registered hooks
         """
         if not self.emu:
-            self.mem_write_hooks.append((cb, begin, end))
+            self.in_insn_hooks.append((cb, begin, end))
             return
         return self.emu.add_instruction_hook(cb, begin=begin, end=end, emu=self, insn=218)
 
@@ -519,7 +527,7 @@ class Speakeasy:
             Hook object for newly registered hooks
         """
         if not self.emu:
-            self.mem_write_hooks.append((cb, begin, end))
+            self.syscall_insn_hooks.append((cb, begin, end))
             return
         return self.emu.add_instruction_hook(cb, begin=begin, end=end, emu=self, insn=700)
 
