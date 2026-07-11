@@ -483,6 +483,14 @@ class WindowsEmulator(BinaryEmulator):
                 pass
             self.emu_hooks_set = True
 
+        # Refresh the current module for the new run. Run-to-run transitions
+        # usually happen inside a single emu_start (via PC rewrite in the code
+        # hook), so curr_mod is not otherwise updated at the boundary; a run
+        # that starts in a different module than the previous one would leave a
+        # stale curr_mod, and handle_import_func consults curr_mod.import_table
+        # first.
+        self.curr_mod = self.get_module_from_addr(run.start_addr)
+
         self.set_pc(run.start_addr)
         return run
 
