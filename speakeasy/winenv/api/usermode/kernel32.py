@@ -1967,27 +1967,32 @@ class Kernel32(api.ApiHandler):
         rv = 0
 
         proc = ""
-        if proc_name:
+        # When the high word of lpProcName is zero the argument is an ordinal,
+        # not a string pointer (the documented MAKEINTRESOURCE convention). Check
+        # that first rather than trying to read a string from a tiny address.
+        if isinstance(proc_name, int) and 0 < proc_name <= 0xFFFF:
+            proc = f"ordinal_{proc_name}"
+        elif proc_name:
             try:
                 proc = self.read_mem_string(proc_name, 1)
                 argv[1] = proc
             except Exception:
-                if isinstance(proc_name, int) and proc_name < 0xFFFF:
-                    # Import is most likely an ordinal
-                    proc = f"ordinal_{proc_name}"
+                proc = ""
 
         if proc:
-            mods = emu.get_peb_modules()
-            for mod in mods:
-                if mod.base == hmod:
-                    bn = mod.get_base_name()
-                    mname, _ = os.path.splitext(bn)
-                    entry = next(filter(lambda entry: entry.name == proc, mod.get_exports()), None)
-                    if entry:
-                        rv = emu.get_proc(mname, proc)
-                    elif emu.config.modules.functions_always_exist:
-                        rv = emu.get_proc(mname, proc)
-                    break
+            # Resolve the handle against any loaded module (including those not
+            # visible in the PEB), not just an exact PEB base match.
+            mod = emu.get_mod_from_addr(hmod) or next((m for m in emu.modules if m.base == hmod), None)
+            if mod:
+                bn = mod.get_base_name()
+                mname, _ = os.path.splitext(bn)
+                if proc.startswith("ordinal_"):
+                    want = int(proc.split("_")[1])
+                    entry = next((e for e in mod.get_exports() if getattr(e, "ordinal", None) == want), None)
+                else:
+                    entry = next((e for e in mod.get_exports() if e.name == proc), None)
+                if entry or emu.config.modules.functions_always_exist:
+                    rv = emu.get_proc(mname, proc)
 
         return rv
 
