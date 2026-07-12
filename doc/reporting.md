@@ -431,6 +431,29 @@ Entry-point highlights:
 }
 ```
 
+## Run semantics: shared process, fresh thread context
+
+A report can contain several `entry_points`, one per *run*: the module entry, each
+TLS callback, every export (when `all_entrypoints` is enabled), created threads, and
+child processes. It is important to read these as activity inside **one modeled
+process**, not as independent, isolated executions.
+
+- **Process-global memory persists across runs.** Heap and `VirtualAlloc`
+  allocations, written globals, dropped-file handles, registry keys, and other
+  object state created by one run remain visible to later runs. Emulating "every
+  export" is therefore a single, accreting process: a later export can observe
+  memory an earlier export allocated or modified. This mirrors how the exports of a
+  real loaded module share one address space.
+
+- **CPU/thread context starts fresh for each run.** Registers, flags (including the
+  direction flag), and the stack pointer are reset at the start of each run, the way
+  a newly scheduled thread would begin, so one run does not inherit another run's
+  register or flag state. The shared *memory* above is deliberate; the *CPU context*
+  is not shared.
+
+If you need truly independent per-export results (no shared process memory), run each
+target in its own `Speakeasy` instance rather than relying on `all_entrypoints`.
+
 ## Related docs
 
 - [Project README](../README.md)

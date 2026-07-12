@@ -40,6 +40,15 @@ se.shutdown()
 
 For runnable scripts, see [../examples](../examples/).
 
+## Run semantics
+
+`run_module(..., all_entrypoints=True)` and `call()` execute multiple runs inside one
+modeled process: process-global memory (heap, allocations, globals) persists across
+runs while each run starts from a fresh CPU/thread context. Use a separate
+`Speakeasy` instance per target if you need fully isolated results. See
+[Run semantics](reporting.md#run-semantics-shared-process-fresh-thread-context) in the
+report walkthrough for details.
+
 ## Related docs
 
 - [Project README](../README.md)
