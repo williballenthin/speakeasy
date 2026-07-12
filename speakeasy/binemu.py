@@ -284,45 +284,68 @@ class BinaryEmulator(MemoryManager, ABC):
         """
         return self.disasm(self.mem_read(addr, size), addr, fast)
 
-    def set_func_args(self, stack_addr, ret_addr, *args, home_space=True):
+    def set_func_args(self, stack_addr, ret_addr, *args, home_space=True, conv=None):
         """
         Set the arguments before an emulated function call. This is how we pass
         arguments to a function when calling it through the emulator.
-        """
-        curr_sp = stack_addr - self.ptr_size
-        nargs = len(args)
 
-        if self.get_arch() == e_arch.ARCH_X86:
+        The resulting frame layout mirrors what get_func_argv/do_call_return
+        expect to read back:
+
+        - x86: arguments are pushed right-to-left with the return address on top.
+          When ``conv`` is fastcall, the first two arguments go in ECX/EDX and the
+          remainder are pushed.
+        - x64: the first four arguments go in RCX/RDX/R8/R9; overflow arguments
+          occupy their ABI slots *above* the 32-byte shadow space (arg5 at
+          RSP+0x28, arg6 at RSP+0x30, ...), not immediately above the return
+          address.
+        """
+        ptr_size = self.ptr_size
+        arch = self.get_arch()
+        arg_list = list(args)
+
+        if arch == e_arch.ARCH_X86:
             sp = e_arch.X86_REG_ESP
-        elif self.get_arch() == e_arch.ARCH_AMD64:
-            sp = e_arch.AMD64_REG_RSP
-            i = 0
-            for i, r in enumerate(
-                (e_arch.AMD64_REG_RCX, e_arch.AMD64_REG_RDX, e_arch.AMD64_REG_R8, e_arch.AMD64_REG_R9)
-            ):
-                if nargs == 0:
-                    break
-                self.reg_write(r, args[i])
-                nargs -= 1
-            # Set the stack home space
-            if home_space:
-                curr_sp -= 0x20
+
+            if conv == e_arch.CALL_CONV_FASTCALL:
+                fast_regs = (e_arch.X86_REG_ECX, e_arch.X86_REG_EDX)
+                for reg, val in zip(fast_regs, arg_list[:2]):
+                    self.reg_write(reg, val)
+                stack_args = arg_list[2:]
+            else:
+                stack_args = arg_list
+
+            curr_sp = stack_addr - ptr_size
+            # Push the stack arguments right-to-left, then the return address.
+            for arg in stack_args[::-1]:
+                self.mem_write(curr_sp, arg.to_bytes(ptr_size, byteorder="little"))
+                self.reg_write(sp, curr_sp)
+                curr_sp -= ptr_size
+
+            self.mem_write(curr_sp, ret_addr.to_bytes(ptr_size, byteorder="little"))
             self.reg_write(sp, curr_sp)
+
+        elif arch == e_arch.ARCH_AMD64:
+            sp = e_arch.AMD64_REG_RSP
+
+            int_regs = (e_arch.AMD64_REG_RCX, e_arch.AMD64_REG_RDX, e_arch.AMD64_REG_R8, e_arch.AMD64_REG_R9)
+            for reg, val in zip(int_regs, arg_list[:4]):
+                self.reg_write(reg, val)
+
+            overflow = arg_list[4:]
+            shadow = 0x20 if home_space else 0
+
+            # Frame below stack_addr: [ret][shadow][overflow args ...]
+            final_sp = stack_addr - ptr_size - shadow - len(overflow) * ptr_size
+            self.mem_write(final_sp, ret_addr.to_bytes(ptr_size, byteorder="little"))
+
+            args_base = final_sp + ptr_size + shadow
+            for i, arg in enumerate(overflow):
+                self.mem_write(args_base + i * ptr_size, arg.to_bytes(ptr_size, byteorder="little"))
+
+            self.reg_write(sp, final_sp)
         else:
             raise EmuException("Unsupported architecture")
-
-        if nargs > 0:
-            for arg in args[-nargs:][::-1]:
-                a = arg.to_bytes(self.ptr_size, byteorder="little")
-
-                self.mem_write(curr_sp, a)
-                self.reg_write(sp, curr_sp)
-                curr_sp -= self.ptr_size
-
-        # Set the return address
-        r = ret_addr.to_bytes(self.ptr_size, byteorder="little")
-        self.mem_write(curr_sp, r)
-        self.reg_write(sp, curr_sp)
 
     def get_func_argv(self, callconv, argc):
         """
