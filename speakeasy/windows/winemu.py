@@ -869,8 +869,22 @@ class WindowsEmulator(BinaryEmulator):
         return None
 
     def _alloc_sentinel(self):
+        # Sentinels live inside the reserved hook window
+        # [IMPORT_HOOK_ADDR, EMU_RESERVED_END), which _set_emu_hooks/_unset_emu_hooks
+        # keep unmapped so a fetch of a sentinel faults and traps into the import
+        # dispatcher. Past EMU_RESERVED_END that guarantee no longer holds -- the
+        # address may be backed by a real allocation, and the import would be
+        # silently mis-dispatched (real bytes executed) instead of trapped. Fail
+        # loudly on exhaustion instead.
         addr = self._next_sentinel
-        self._next_sentinel += self.get_ptr_size()
+        ptr_size = self.get_ptr_size()
+        if addr + ptr_size > winemu.EMU_RESERVED_END:
+            raise WindowsEmuError(
+                "import sentinel address space exhausted "
+                f"(0x{winemu.IMPORT_HOOK_ADDR:x}-0x{winemu.EMU_RESERVED_END:x}); "
+                "too many distinct imports/dynamic resolutions"
+            )
+        self._next_sentinel = addr + ptr_size
         return addr
 
     def ensure_pe_import_hooks(self, base_addr):
