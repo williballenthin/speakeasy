@@ -84,6 +84,13 @@ class WindowsEmulator(BinaryEmulator):
     def __init__(self, config, exit_event=None, debug=False, gdb_port=None):
         super().__init__(config)
 
+        # Handle/object-id counters live as class attributes on the object and
+        # resource-manager helper classes, so they otherwise persist across
+        # emulator instances in the same process and make pid/tid/handle values
+        # (which land in the report) non-deterministic across runs. Seed them to
+        # a fixed base for every fresh emulator so reports are reproducible.
+        self._reset_id_counters()
+
         self.debug: bool = debug
         self.gdb_port: int | None = gdb_port
         self.arch: int = 0
@@ -162,6 +169,37 @@ class WindowsEmulator(BinaryEmulator):
         super()._parse_config(config)
         self.cd = self.config.current_dir
         self.command_line = self.config.command_line
+
+    @staticmethod
+    def _reset_id_counters():
+        """
+        Seed the class-level handle/object-id counters to their defaults.
+
+        These counters are class attributes on the object and resource-manager
+        helper classes (many of which are constructed without a back-reference to
+        the emulator), so relocating them to per-instance state is a larger
+        change. Reseeding on construction makes each fresh emulator deterministic,
+        which is what the report reproducibility depends on. Note: this does not
+        isolate two emulator instances that are *concurrently* live in one
+        process -- that remains a pre-existing limitation.
+        """
+        from speakeasy.windows.cryptman import CryptContext
+        from speakeasy.windows.fileman import File, FileMap, Pipe
+        from speakeasy.windows.netman import WininetComponent
+        from speakeasy.windows.objman import Console, KernelObject
+        from speakeasy.windows.regman import RegKey
+        from speakeasy.windows.sessman import GuiObject
+
+        KernelObject.curr_handle = 0x220
+        KernelObject.curr_id = 0x400
+        Console.curr_handle = 0x340
+        GuiObject.curr_handle = 0x120
+        WininetComponent.curr_handle = 0x20
+        RegKey.curr_handle = 0x180
+        CryptContext.curr_handle = 0x680
+        File.curr_handle = 0x80
+        FileMap.curr_handle = 0x280
+        Pipe.curr_handle = 0x400
 
     def advance_bootstrap_phase(self, phase):
         if phase <= self.bootstrap_phase:
