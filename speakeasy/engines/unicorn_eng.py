@@ -282,3 +282,8 @@ class EmuEngine:
             except Exception:
                 pass
         self._callbacks.clear()
+        # Drop our reference to the underlying Unicorn engine so it can be
+        # reclaimed by GC instead of leaking for the life of the process. On the
+        # required Unicorn (>=2.1.4) freeing one engine does not disturb other
+        # live engines, so this is safe even when several emulators coexist.
+        self.emu = None

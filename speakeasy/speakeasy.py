@@ -404,12 +404,11 @@ class Speakeasy:
         """
         Closes the emulation instance and releases underlying engine resources.
 
-        Removes all Unicorn hooks so the native engine can be safely finalized
-        by the garbage collector without accessing stale callbacks.  The Uc
-        handle itself is intentionally kept alive — Unicorn's ``uc_close`` has
-        process-global side effects that can corrupt other live engine
-        instances, so we let the normal GC + weak-ref finalizer handle it when
-        the object graph is fully unreachable.
+        Removes all Unicorn hooks and drops the reference to the native engine so
+        it can be reclaimed by the garbage collector rather than leaking for the
+        life of the process. On the required Unicorn (>=2.1.4) freeing one engine
+        does not disturb other live engines, so this is safe even when several
+        emulators coexist in one process.
         """
         if self.emu is None:
             return
