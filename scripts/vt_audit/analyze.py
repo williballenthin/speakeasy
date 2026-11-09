@@ -99,7 +99,8 @@ def image_rewritten(sample_path, regions_dir, regions, image_base):
         diff_total += d
         size_total += n
         if d > 0.05 * n:
-            touched.append(f"{s.Name.rstrip(b'\0').decode(errors='replace')}:{100 * d // n}%")
+            name = s.Name.rstrip(b"\0").decode(errors="replace")
+            touched.append(f"{name}:{100 * d // n}%")
     return (diff_total / size_total if size_total else None), touched
 
 
@@ -201,6 +202,9 @@ def main():
             row["outcome"] = "HARNESS-CRASH"
             log = open(os.path.join(odir, sha + ".log"), errors="replace").read()[-800:] if os.path.exists(os.path.join(odir, sha + ".log")) else ""
             row["log_tail"] = log
+            # rc 124/137 = killed by the hard timeout in run_audit.sh: speakeasy's own limits did not stop it
+            kind = "harness_timeout" if row["exit"] in ("124", "137") else "harness_crash"
+            row["first_error"] = {"error": kind, "secs": row["secs"]}
             rows.append(row)
             continue
         h = json.load(open(hpath))
