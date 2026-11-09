@@ -206,3 +206,26 @@ See `README.md`. Decision (2026-11-09): no regression re-runs for now. Each week
 - #48 — GetDlgCtrlID always returns 1, also for a NULL window
 - #49 — FindResource compares string resource types case-sensitively, so a "gggr" lookup misses a "GGGR" resource
 - #50 — Missing API models that report success but leave the out-parameter zero: NtRaiseHardError, NtCreateSemaphore, NtOpenKeyEx, CreateStreamOnHGlobal
+
+## 10. Run 2026-11-09 (master `588cb575`)
+
+Fork #21–#50 were moved upstream on 2026-11-09 (open there as mandiant/speakeasy #565–#594, fork #N = upstream #N+544); the fork copies are closed "not planned", which does not mean fixed. Treat them as open upstream issues.
+
+This run's issues could **not be filed**: the session had no GitHub MCP tools and no push/API access to the fork (git proxy 403). The drafts were left with the run's results; until they are filed, treat these as known root causes (all confirmed by monkeypatch):
+
+| sample | root cause |
+|---|---|
+| xworm `f28f53b5` | waits on a thread handle return WAIT_OBJECT_0 before the thread runs; the worker runs after ExitProcess |
+| respawner `b99b85e7` | the child loop in `run_module` ignores `max_total_time` (harness 300 s kill) |
+| dacic `bd058498` | VirtualAlloc(Ex) with lpAddress returns another address; PEB.ImageBaseAddress 0 for file-backed children |
+| BlackMatter `60b94ca5` | KUSER_SHARED_DATA.NtSystemRoot empty; FindFirstFile does not list configured modules |
+| Cobalt Strike `d522cbbd` | named-pipe client is the `\\.\pipe*` stager.bin file; ReadFile never blocks |
+| tedy `2e8c63ab` | ExitProcess does not close the process's handles; named mutexes outlive it |
+| Donut .cpl `8507f3fa` | CPlApplet export run gets placeholder args instead of CPL_INIT |
+| Snowhush `ec806791` | SHGetKnownFolderPath knows 16 GUIDs; combase has no ole32 alias (#577 class) |
+| blackmoon `d56f664c` | input path without extension → no '.' in GetModuleFileName (MFC crash); child: VirtualProtect size 0 → UC_ERR_ARG |
+| injector `62c31f3e` | run at a synthetic decoy child's MZ header; `get_module_from_addr` inclusive end |
+
+Corrections: the VMProtect "time budget" cases (9b02b8a6 here, e3136233/cddb73e9 this run) are upstream #589 overhead, not a slow check. New #594-class members: CryptBinaryToString, BCryptCreateHash, EnumDisplaySettings. #585 also breaks string keys derived from InterruptTime deltas (StoneDrill). FreshyCalls-style resolvers jump to `Zw* stub + 8` (#584 fix must keep +8 valid).
+
+Tooling: `analyze.py` needed Python 3.12 for an f-string (the venv is 3.11); fixed. A hard-timeout kill is now `first_error: harness_timeout`. The report collapses identical consecutive API events, so "41 APIs + max_api_count" can be ~20k calls of one API.
