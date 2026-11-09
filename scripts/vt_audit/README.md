@@ -31,7 +31,8 @@ The tooling lives on the `vt-audit` branch of williballenthin/speakeasy under `s
    - Only a root cause that is confirmed this way may become a new issue. Hypotheses go into the summary as "unconfirmed leads", or are dropped.
 4. Check for duplicates before filing:
    - Fork: `gh api -X GET search/issues -f q='repo:williballenthin/speakeasy is:issue <keywords>'`. Also list the `vt-audit` label, open and closed.
-   - Upstream: `gh api -X GET search/issues -f q='repo:mandiant/speakeasy is:issue <keywords>'`. Many fork issues are mirrored there (#565–#594 mirror fork #21–#50).
+   - Upstream: `gh api -X GET search/issues -f q='repo:mandiant/speakeasy is:issue <keywords>'`.
+   - Fork issues closed as "not planned" may have been **moved upstream**, not fixed. For example, fork #21–#50 were moved to mandiant/speakeasy #565–#594 (same titles, same order). Before treating a closed fork issue as fixed or regressed, look for an upstream copy with the same title. If the upstream copy is open, the finding is a re-observation: list it in the summary with a link to the upstream issue. Never comment on mandiant/speakeasy.
    - Search by API name, file and function, and the sample's sha256.
    - If an open issue covers the root cause and the new sample adds evidence (a new family, a new variant, a better reproducer), add **one** comment to that issue with the sample, its context and a link to the run summary. Then list it in the summary under "Re-observed".
    - If a closed issue covers it, the fix may have regressed. Treat it as a new finding and reference the closed issue.

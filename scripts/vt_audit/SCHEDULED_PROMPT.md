@@ -40,7 +40,8 @@ The tooling, the playbook and the issue format live on the `vt-audit` branch of 
    - Upstream: `gh api -X GET search/issues -f q='repo:mandiant/speakeasy is:issue <keywords>'`.
    - Search by API name, code location, and sample sha256.
    - If an open issue already covers the root cause and the new sample adds real evidence, add **one** comment to that issue, with the sample (sha256, VT link, family, how it was selected, how it stopped) and a link to this run's summary issue. Use `gh` only for search; post with the GitHub MCP tools.
-   - If a closed issue covers it, report it as a possible regression and reference the closed issue.
+   - Fork issues closed as "not planned" were usually moved upstream, not fixed: fork #21–#50 are open upstream as mandiant/speakeasy #565–#594 (same titles, same order). If a finding matches an open upstream copy, list it in the summary as re-observed with the upstream link; do not comment upstream.
+   - If an issue was closed as fixed, report the finding as a possible regression and reference that issue.
 6. **File on williballenthin/speakeasy only.** Never post to mandiant/speakeasy.
    - If the run found no new confirmed root cause and added no evidence to an existing issue, file **nothing**.
    - Otherwise:
