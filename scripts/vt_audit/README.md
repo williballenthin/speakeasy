@@ -15,6 +15,7 @@ The tooling lives on the `vt-audit` branch of williballenthin/speakeasy under `s
 | `analyze.py` | oracles (config IOCs, sandbox IOCs, sandbox payloads, emulator-internal evidence), how each run ended → `summary.json` |
 | `triage.py` | groups runs by stop signature and marks out-of-scope stops → `triage.md` |
 | `oracles.py`, `apis.py` | small viewers: oracle matrix; API trace tail of a report |
+| `SCHEDULED_PROMPT.md` | the prompt of the weekly scheduled task (Wednesdays 00:00 UTC); keep it in sync when you change the procedure |
 | `seen.txt` | sha256s assessed in earlier runs; never re-tested |
 | `runs/<date>.tsv` | per-run sample list: sha256, stratum, family, outcome, first error |
 
