@@ -1,0 +1,6 @@
+# never commit samples, memory dumps or reports
+work/
+data/
+out/
+*.bin
+__pycache__/
