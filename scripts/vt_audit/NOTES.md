@@ -229,3 +229,27 @@ Filed as summary #51 with sub-issues #52–#62 (all confirmed by monkeypatch). T
 Corrections: the VMProtect "time budget" cases (9b02b8a6 here, e3136233/cddb73e9 this run) are upstream #589 overhead, not a slow check. New #594-class members: CryptBinaryToString, BCryptCreateHash, EnumDisplaySettings. #585 also breaks string keys derived from InterruptTime deltas (StoneDrill). FreshyCalls-style resolvers jump to `Zw* stub + 8` (#584 fix must keep +8 valid).
 
 Tooling: `analyze.py` needed Python 3.12 for an f-string (the venv is 3.11); fixed. A hard-timeout kill is now `first_error: harness_timeout`. The report collapses identical consecutive API events, so "41 APIs + max_api_count" can be ~20k calls of one API.
+
+## 11. Run 2026-11-11 (master `588cb575`, same commit as the 2026-11-09 run)
+
+The fork's master was 55 commits behind mandiant/speakeasy master `3d1629b`, which already fixes most of the 2026-11-09 findings (#574, #577, #573, #580, #589, #585, …). The whole batch was re-run on upstream to separate stops that upstream has already fixed (now `compare.sh`). Several upstream copies were closed "completed" but declined in a comment (#575: "too specific"; #594 closed with no handler added), so check the comments before calling an upstream issue fixed.
+
+Filed as summary #63 with sub-issues #64–#73 (all confirmed by monkeypatch):
+
+| sample | issue | root cause |
+|---|---|---|
+| AdaptixC2 loader `f77b051d` | #64 | TlsSetValue never writes TEB.TlsSlots; x64 TEB is mapped as 1 page and gs:[0x1480] lands in the PEB |
+| hzlvlvv `67079b8b` | #65 | VirtualProtect old protection and new `mm.prot` are per MemMap, not per page |
+| Phorpiex/Trik `b9c5a268` | #66 | GetFileAttributes counts by_ext/default handlers as existing files (`.txt`/`.exe` markers) |
+| Vertex RAT `e2acc195` | #67 | wsock32 ordinal imports bound with ws2_32 ordinal numbers |
+| Cobalt Strike ghosting `8d2d1a8a` | #68 | NtCreateSection ignores SEC_IMAGE; NtMapViewOfSection with *Base maps nothing |
+| Themida `ae12d97a` | #69 | RtlGetNativeSystemInformation not aliased to ZwQuerySystemInformation → "kernel debugger present" |
+| APC injector `121a5fe3` | #70 | default command line `svchost.exe myarg1 myarg2` → argc 3 |
+| Impolice ransomware `29c9a86b` | #71 | run-to-completion FIFO threads; burner threads use up max_total_time |
+| Remus `077188a9`, `dfdc6109`, `a028c5d3` | #72 | fallback leaves GetLastInputInfo / GetThreadPreferredUILanguages / GetPrivateProfile* results unwritten |
+| VMProtect `93811dad`, `2a0792e2` | #73 | upstream-only: call-site block hook (a01d430) costs a Python call per block |
+
+Lessons:
+- #52/#618 (no yielding on waits) showed up in 4 samples via new triggers: event waits in MFC `CWinThread::CreateThread`, `WaitForSingleObjectEx`, and an empty `GetMessage`. It also matters because each run reuses the zeroed shared stack, so a deferred thread loses data passed by pointer into the creator's stack.
+- Bad inputs this week: a memory dump with stale heap pointers in `.data`, and a file with a zeroed import directory. Neither is worth filing.
+- `unhandled_interrupt` with a `push` instruction is `int 0x29` (`__fastfail`); the reported pc is the next instruction.
