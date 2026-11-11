@@ -16,7 +16,8 @@ The tooling, the playbook and the issue format live on the `vt-audit` branch of 
      - `$W/tools` on a local branch `vt-audit` that tracks `origin/vt-audit`.
    - Record the master commit.
 2. **Run the batch** with `$W/tools/scripts/vt_audit/run_audit.sh $W/master $W/work`. It uses a 7-day window and 60 samples by default, and takes about an hour. Run it in the background and wait for it to finish. If it fails, fix the tooling on the `vt-audit` worktree and re-run. Tooling fixes are allowed and should be committed.
-3. **Triage.** Read `$W/work/triage.md` and `$W/work/analyze.txt`. For each in-scope stop group, find the root cause on a representative sample. Parallel subagents are fine for independent groups. For each one:
+   Then fetch mandiant/speakeasy `master` into a third worktree `$W/upstream` and run `$W/tools/scripts/vt_audit/compare.sh $W/upstream $W/work` (about 20 minutes). Stops that upstream no longer shows are "fixed upstream, not yet in the fork": list them in the summary, do not file them.
+3. **Triage.** Read `$W/work/triage.md`, `$W/work/compare.txt` and `$W/work/analyze.txt`. For each in-scope stop group, find the root cause on a representative sample. Parallel subagents are fine for independent groups. For each one:
    - read the report events, the error's `pc`/`instruction`/`context_summary`, and the signature-fallback list in `harness.json`;
    - disassemble the guest code with capstone, using `out/<sha>/regions/*.bin`;
    - read the speakeasy code that handled the relevant API or event;
