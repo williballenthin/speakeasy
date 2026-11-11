@@ -28,10 +28,8 @@ python3 -I - "$WORK/out/summary.json" "$WORK/out-cmp/summary.json" > "$WORK/comp
 import json, sys
 
 def first_error(x):
-    v = x.get("first_error") or ""
-    if isinstance(v, dict):
-        v = f'{v.get("type")} {v.get("pc")} {v.get("instruction", "")}'
-    return str(v)[:55]
+    v = x.get("first_error") or {}
+    return " ".join(str(v[k]) for k in ("error", "pc", "instruction", "last_api") if v.get(k))[:55]
 
 a = {x["sha256"]: x for x in json.load(open(sys.argv[1]))}
 b = {x["sha256"]: x for x in json.load(open(sys.argv[2]))}
