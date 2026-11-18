@@ -253,3 +253,22 @@ Lessons:
 - #52/#618 (no yielding on waits) showed up in 4 samples via new triggers: event waits in MFC `CWinThread::CreateThread`, `WaitForSingleObjectEx`, and an empty `GetMessage`. It also matters because each run reuses the zeroed shared stack, so a deferred thread loses data passed by pointer into the creator's stack.
 - Bad inputs this week: a memory dump with stale heap pointers in `.data`, and a file with a zeroed import directory. Neither is worth filing.
 - `unhandled_interrupt` with a `push` instruction is `int 0x29` (`__fastfail`); the reported pc is the next instruction.
+
+## 12. Run 2026-11-18 (master `588cb575`, unchanged; compared with mandiant/speakeasy `df05a906`)
+
+Filed as summary #75 with sub-issues #76–#78 (all confirmed by monkeypatch; the same stop on upstream):
+
+| sample | issue | root cause |
+|---|---|---|
+| kerneldrutil `33959ce2` | #76 | `RtlImageNtHeader` has no handler; the fallback returns NULL for the pointer |
+| exeheaderl `ca366a12` | #77 | `CheckRemoteDebuggerPresent` ignores hProcess, succeeds for NULL (anti-emulation gate) |
+| chromelevator `f19e34cf` | #78 | fallback `GetTopWindow`/`GetWindow` mint a new HWND per call, the window walk never ends |
+
+Evidence comments: #66 (new Trik/Xylonite variant reaches its C2 download with the fix), #73 (7 samples time out with 0–1 APIs on upstream; ulise 3 s on the fork vs 35 s on upstream, not caused by `dynamic_code_contents`).
+
+Lessons:
+- **Harness bug fixed:** samples were loaded under a bare sha256 with no extension. MFC/Delphi startup (`strrchr(path, '.')`) then crashes; upstream declined to handle it (fork #60, "the caller's job"). `run_one.py` now copies the sample to `<out>/input/<sha>.<exe|dll|sys>`. Loading from the samples directory also mounted every other sample of the batch into the guest's current directory. farfli: 233 APIs → 4,608 APIs and PAYLOAD.
+- mandiant/speakeasy master is speakeasy 2.0: a nested strict config (`limits.per_run_time`, `memory.accesses`, `runs.children`, ...) and a report with `runs` instead of `entry_points` and renamed error types (`api_call_limit`, `per_run_time_limit`, `api_loop_limit`). `run_one.py` and `analyze.py` handle both.
+- Upstream with `memory.accesses` off still counts every instruction while `memory.dynamic_code_contents` is on (documented); turn it off for speed comparisons. Upstream's `api_loop_limit` (5000 calls with no new call site, #644) cuts finite junk-API delay loops (androm); that is an accepted trade-off upstream.
+- Bad inputs this week: two memory dumps (stale 0x7ffd... pointers in `.data`; a stale `__pioinfo`), an import directory RVA outside the image, an entry point mid-instruction. Signs of a dump: raw offset == RVA and raw size == virtual size for every section.
+- FreshyCalls-style `Zw* stub + 8` (Meterpreter ReflectiveLoader) seen again; with a +8 redirect the raw-bytes export run maps the whole payload (#584).

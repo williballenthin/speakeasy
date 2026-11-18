@@ -28,6 +28,13 @@ SKIP_KEYS = {"tool", "description", "categories", "protocol_tags", "family", "ve
 SKIP_TAG = ("emu.struct", "emu.gdt", "emu.segment", "emu.kernel", "emu.KUSER")
 
 
+def url_host(s):
+    """The host of a URL-shaped indicator ("https://c2.example/api" -> "c2.example"), else None. Samples often
+    build the URL at run time, so only the host shows up in memory or in API arguments."""
+    m = re.match(r"^[a-z][a-z0-9+.-]*://([^/:?#\s]{4,})", s.strip(), re.I)
+    return m.group(1) if m and "." in m.group(1) else None
+
+
 def indicators(cfg):
     out = set()
 
@@ -45,6 +52,9 @@ def indicators(cfg):
                 return  # schema enums (PLAINTEXT, HKEY_CURRENT_USER, ...) and placeholders, not IOCs
             if len(s) >= 6 and not re.fullmatch(r"[\d.:]+", s) or re.fullmatch(r"\d+\.\d+\.\d+\.\d+", s):
                 out.add(s)
+            host = url_host(s)
+            if host:
+                out.add(host)
 
     for fam in (cfg or {}).get("families", []):
         for c in fam.get("configs", []):
@@ -130,6 +140,15 @@ def sandbox_indicators(bs):
     for h in bs.get("http_conversations") or []:
         if h.get("url"):
             out.add(h["url"])
+    for i in list(out):
+        host = url_host(i)
+        if host and len(host) >= 6:
+            out.add(host)
+    # sandboxes report kernel object names ("\Sessions\1\BaseNamedObjects\X"); the guest passes "X" or "Global\X"
+    for i in list(out):
+        short = re.sub(r"^(\\Sessions\\\d+)?\\BaseNamedObjects\\((Global|Local)\\)?", "", i)
+        if short != i and len(short) >= 6:
+            out.add(short)
     def norm(i):
         return re.sub(r"^(\\Sessions\\\d+)?\\BaseNamedObjects\\", "", i)
 
@@ -184,6 +203,34 @@ def build_generic(samples, sdir):
     GENERIC_SANDBOX.update(i for i, fams in seen.items() if len(fams) >= 3)
 
 
+# speakeasy >= 2.0 report schema (mandiant/speakeasy master): map it onto the 1.x names used below
+V2_ERRORS = {
+    "api_call_limit": "max_api_count",
+    "per_run_time_limit": "timeout",
+    "total_time_limit": "timeout",
+    "instruction_limit": "max_instructions",
+}
+
+
+def normalize_report(r):
+    if "entry_points" in r or "runs" not in r:
+        return r
+    eps = []
+    for run in r.get("runs") or []:
+        ep = dict(run)
+        err = dict(run.get("error") or {}) or None
+        if err:
+            err["type"] = V2_ERRORS.get(err.get("type"), err.get("type"))
+            if err.get("limit") is not None:
+                err["count"] = err["limit"]
+        ep["error"] = err
+        ep["dynamic_code_segments"] = run.get("dynamic_code") or []
+        eps.append(ep)
+    r = dict(r)
+    r["entry_points"] = eps
+    return r
+
+
 def main():
     manifest, sdir, odir = sys.argv[1:4]
     samples = json.load(open(manifest))["samples"]
@@ -209,6 +256,7 @@ def main():
             continue
         h = json.load(open(hpath))
         r = json.load(open(rpath)) if os.path.exists(rpath) else {"entry_points": []}
+        r = normalize_report(r)
         row["harness_error"] = h.get("harness_error")
         row["no_handler"] = h.get("no_handler", {})
         row["unsupported"] = h.get("unsupported", {})
