@@ -272,3 +272,11 @@ Lessons:
 - Upstream with `memory.accesses` off still counts every instruction while `memory.dynamic_code_contents` is on (documented); turn it off for speed comparisons. Upstream's `api_loop_limit` (5000 calls with no new call site, #644) cuts finite junk-API delay loops (androm); that is an accepted trade-off upstream.
 - Bad inputs this week: two memory dumps (stale 0x7ffd... pointers in `.data`; a stale `__pioinfo`), an import directory RVA outside the image, an entry point mid-instruction. Signs of a dump: raw offset == RVA and raw size == virtual size for every section.
 - FreshyCalls-style `Zw* stub + 8` (Meterpreter ReflectiveLoader) seen again; with a +8 redirect the raw-bytes export run maps the whole payload (#584).
+
+## 13. Run 2026-11-25 (master `588cb575`, unchanged): not run
+
+The batch could not select any samples. The first Intelligence search returned `ForbiddenError`. The key's quotas (`/users/<key>/overall_quotas`) showed `intelligence_searches_monthly` and `intelligence_downloads_monthly` allowed = 0, and `api_requests_monthly` at about 107k used of 15.5k allowed for both the user and the `hex_rays` group, so plain lookups also return `QuotaExceededError`. The key has lost the Intelligence privileges that §1 describes. Nothing was emulated, triaged or filed, and `seen.txt` is unchanged.
+
+Tooling: `collect.py` now runs a quota preflight and stops with the reason when the key cannot search, download or make API calls.
+
+mandiant/speakeasy master moved to `48605cd0` (2026-11-20). It adds handlers for #747/#748/#751 (fork #76–#78) and finds the call site of an API without a per-block hook, which should address fork #73.

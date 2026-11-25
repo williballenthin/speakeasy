@@ -121,6 +121,35 @@ def vt_get(path, params=None, retries=4):
     raise RuntimeError(f"VT request failed: {path}: {err!r}")
 
 
+def preflight():
+    """Fail fast, with a readable reason, when the key cannot search or download.
+
+    The key's group has lost its Intelligence privileges before (2026-11-25: searches and downloads
+    allowed 0, monthly API quota exhausted); the first search then fails with a bare ForbiddenError.
+    """
+    key = os.environ["VT_API_KEY"]
+    try:
+        d = vt_get(f"users/{key}/overall_quotas")
+    except RuntimeError:
+        raise SystemExit("[!] preflight: could not read the VT quotas of the key") from None
+    if "error" in d:
+        raise SystemExit(f"[!] preflight: VT quotas: {d['error'].get('code')}")
+    q = d.get("data", {})
+    problems = []
+    for name in ("intelligence_searches_monthly", "intelligence_downloads_monthly"):
+        user = q.get(name, {}).get("user", {})
+        if not user.get("allowed"):
+            problems.append(f"{name} allowed={user.get('allowed')}")
+    for name in ("api_requests_monthly", "api_requests_daily"):
+        for level in ("user", "group"):
+            v = q.get(name, {}).get(level)
+            if v and v.get("allowed") and v.get("used", 0) >= v["allowed"]:
+                problems.append(f"{name}.{level} used={v['used']} allowed={v['allowed']}")
+    if problems:
+        raise SystemExit("[!] preflight: the VT key cannot run an audit: " + "; ".join(problems))
+    print("[*] preflight: VT key has Intelligence search and download quota", file=sys.stderr)
+
+
 def search(query, order="", limit=300):
     params = {"query": query, "limit": limit}
     if order:
@@ -262,6 +291,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--download", action="store_true")
     args = ap.parse_args()
+    preflight()
 
     seen = set()
     if args.seen and os.path.exists(args.seen):
