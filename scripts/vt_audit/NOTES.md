@@ -273,10 +273,22 @@ Lessons:
 - Bad inputs this week: two memory dumps (stale 0x7ffd... pointers in `.data`; a stale `__pioinfo`), an import directory RVA outside the image, an entry point mid-instruction. Signs of a dump: raw offset == RVA and raw size == virtual size for every section.
 - FreshyCalls-style `Zw* stub + 8` (Meterpreter ReflectiveLoader) seen again; with a +8 redirect the raw-bytes export run maps the whole payload (#584).
 
-## 13. Run 2026-11-25 (master `588cb575`, unchanged): not run
+## 13. Run 2026-11-27 (master `588cb575`, unchanged; compared with mandiant/speakeasy `34b45ebc`)
 
-The batch could not select any samples. The first Intelligence search returned `ForbiddenError`. The key's quotas (`/users/<key>/overall_quotas`) showed `intelligence_searches_monthly` and `intelligence_downloads_monthly` allowed = 0, and `api_requests_monthly` at about 107k used of 15.5k allowed for both the user and the `hex_rays` group, so plain lookups also return `QuotaExceededError`. The key has lost the Intelligence privileges that §1 describes. Nothing was emulated, triaged or filed, and `seen.txt` is unchanged.
+The scheduled run of 2026-11-25 could not select samples: the key had no Intelligence search or download quota left, and its monthly API quota was used up, so the first search returned a bare `ForbiddenError`. `collect.py` now runs a quota preflight. The quota can be granted to the user or inherited from the `hex_rays` group (2026-11-27: user 0, group 2000), and either one is enough. The batch was re-run on 2026-11-27 with the window 2026-11-20..2026-11-27.
 
-Tooling: `collect.py` now runs a quota preflight and stops with the reason when the key cannot search, download or make API calls.
+Filed as summary #79 with sub-issues #80–#82 (all confirmed by monkeypatch; the root cause is in the same code upstream):
 
-mandiant/speakeasy master moved to `48605cd0` (2026-11-20). It adds handlers for #747/#748/#751 (fork #76–#78) and finds the call site of an API without a per-block hook, which should address fork #73.
+| sample | issue | root cause |
+|---|---|---|
+| gandcrab-labelled USB backdoor `f823e7ef`, mikey `75af1c18` | #80 | `_lookup_api_declaration` tries only `normalize_dll_name` (the first DLL_HOSTS host), so kernelbase never falls back to kernel32 declarations: 544 exports are `unsupported_api` (fork) or hit the 4-arg stub (upstream `apis.stubs`) |
+| cryptowall `e2f75999` | #81 | `ZwAllocateVirtualMemory` drops `*BaseAddress` and always succeeds; the loop needs STATUS_CONFLICTING_ADDRESSES (0xC0000018) when it reserves its own image base |
+| zenpak `d3956294` | #82 | `open_process` searches `processes` only, not `child_processes`: OpenProcess(child pid) fails |
+
+Lessons:
+- Upstream defaults `apis.stubs` (and `modules.stubs`) to on. A missing declaration therefore no longer stops a run there; it gets a stdcall stub with 4 arguments, which silently corrupts the x86 stack for other arities. When upstream "gets past" a fork `unsupported_api`, check the argc of the stubbed events before you call the stop fixed upstream (remcos/arkmblk `msvcp` imports look like this, unanalysed).
+- The fork's timeouts are often #45 (upstream #589, fixed upstream): zenpak's 28e9-instruction delay loop runs at about 4M instructions/s on the fork and about 500–700M/s with the hook removed. Upstream's 30 s per-run limit is still too short for it (about 38 s).
+- `FlsGetValue2` as last_api in triage is a red herring: it is called by the CRT exception filter after the fault.
+- Metasploit metsrv's ReflectiveLoader resolves SSNs by sorting the `Zw*` exports by address and calls `export + 8` (#584).
+- Bad inputs this week: an import directory past SizeOfImage with stale absolute IAT pointers, an entry point in the middle of an instruction, and a file infector (fujack) that the `virus.*` filter missed.
+- Side observations, not filed: `gethostbyname` of an IP literal returns the configured default address; `ZwResumeProcess` has no handler.
