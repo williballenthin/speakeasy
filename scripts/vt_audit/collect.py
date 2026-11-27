@@ -136,10 +136,11 @@ def preflight():
         raise SystemExit(f"[!] preflight: VT quotas: {d['error'].get('code')}")
     q = d.get("data", {})
     problems = []
+    # A quota can be granted to the user or inherited from the group; either one is enough.
     for name in ("intelligence_searches_monthly", "intelligence_downloads_monthly"):
-        user = q.get(name, {}).get("user", {})
-        if not user.get("allowed"):
-            problems.append(f"{name} allowed={user.get('allowed')}")
+        levels = {lv: q.get(name, {}).get(lv) or {} for lv in ("user", "group")}
+        if not any(v.get("allowed", 0) > v.get("used", 0) for v in levels.values()):
+            problems.append(name + " " + " ".join(f"{lv}={v.get('used')}/{v.get('allowed')}" for lv, v in levels.items()))
     for name in ("api_requests_monthly", "api_requests_daily"):
         for level in ("user", "group"):
             v = q.get(name, {}).get(level)

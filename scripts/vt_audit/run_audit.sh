@@ -30,7 +30,7 @@ git -C "$SE" submodule update --init --depth 1 deps/win32json deps/phnt >/dev/nu
 uv venv -q --allow-existing "$WORK/venv"
 uv pip install -q --python "$WORK/venv/bin/python" -e "$SE"
 PY="$WORK/venv/bin/python"
-"$PY" -c 'import speakeasy, sys; print("[*] installed", speakeasy.__file__)'
+"$PY" -I -c 'import speakeasy, sys; print("[*] installed", speakeasy.__file__)'
 
 # 2. select + download
 python3 -I "$TOOLS/collect.py" --since "$SINCE" --until "$UNTIL" --target "$TARGET" \
